@@ -19,15 +19,19 @@ import logging
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
+from tqdm import trange
 
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.policies.diffusion.gradcam_visualization import (
+    compute_inference_gradcam_tensors,
     export_inference_gradcam,
     export_train_gradcam,
+    render_gradcam_frame,
 )
 from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.utils.io_utils import write_video
 from lerobot.utils.utils import init_logging
 
 
@@ -78,7 +82,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--alpha",
         type=float,
-        default=0.45,
+        default=0.35,
         help="Overlay blending strength in [0, 1].",
     )
     parser.add_argument(
@@ -88,7 +92,160 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=["cpu", "cuda", "mps"],
         help="Override policy device. If omitted, uses the config device.",
     )
+    parser.add_argument(
+        "--export-video",
+        action="store_true",
+        default=False,
+        help="Also export a video showing Grad-CAM dynamics across consecutive dataset samples.",
+    )
+    parser.add_argument(
+        "--video-num-samples",
+        type=int,
+        default=120,
+        help="Number of consecutive dataset samples to render into the Grad-CAM video.",
+    )
+    parser.add_argument(
+        "--video-full-episode",
+        action="store_true",
+        default=False,
+        help="Render the full episode containing sample-index. Overrides video-num-samples.",
+    )
+    parser.add_argument(
+        "--video-episode-index",
+        type=int,
+        default=None,
+        help="Render this exact episode index. Implies video-full-episode and overrides sample-index for video.",
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=int,
+        default=10,
+        help="FPS of the exported Grad-CAM video.",
+    )
+    parser.add_argument(
+        "--video-view",
+        type=str,
+        default="overlay",
+        choices=["overlay", "heat", "cam", "raw"],
+        help="Which visualization to encode in the video.",
+    )
+    parser.add_argument(
+        "--video-obs-step",
+        type=int,
+        default=-1,
+        help="Observation step to render in the video. -1 means the latest/current observation.",
+    )
+    parser.add_argument(
+        "--video-camera-index",
+        type=int,
+        default=0,
+        help="Camera index to render in the video.",
+    )
+    parser.add_argument(
+        "--video-name",
+        type=str,
+        default=None,
+        help="Optional output video filename. Defaults to gradcam_<view>_sample_<start>_<end>.mp4.",
+    )
     return parser
+
+
+def _export_inference_gradcam_video(
+    policy,
+    preprocessor,
+    dataset,
+    output_dir: Path,
+    start_index: int,
+    num_samples: int,
+    fps: int,
+    view: str,
+    obs_step: int,
+    camera_index: int,
+    action_step: int,
+    action_dim: int,
+    alpha: float,
+    video_name: str | None,
+) -> Path:
+    if num_samples <= 0:
+        raise ValueError("video-num-samples must be positive.")
+    end_index = min(start_index + num_samples, len(dataset))
+    if start_index >= end_index:
+        raise ValueError("Video sample range is empty.")
+
+    dataset_fps = getattr(dataset, "fps", fps)
+    sample_stride = max(1, round(dataset_fps / fps))
+    sample_indices = list(range(start_index, end_index, sample_stride))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if video_name is None:
+        video_name = (
+            f"gradcam_{view}_sample_{start_index:06d}_{end_index - 1:06d}"
+            f"_{fps}fps_stride{sample_stride}.mp4"
+        )
+    video_path = output_dir / video_name
+
+    logging.info(
+        "Rendering Grad-CAM video from dataset indices [%s, %s): dataset_fps=%s, target_fps=%s, "
+        "sample_stride=%s, rendered_frames=%s",
+        start_index,
+        end_index,
+        dataset_fps,
+        fps,
+        sample_stride,
+        len(sample_indices),
+    )
+
+    frames = []
+    target_values = []
+    for idx in trange(len(sample_indices), desc="Rendering Grad-CAM video frames"):
+        sample_idx = sample_indices[idx]
+        raw_batch = default_collate([dataset[sample_idx]])
+        with torch.enable_grad():
+            raw_images, cams, target_value = compute_inference_gradcam_tensors(
+                policy=policy,
+                preprocessor=preprocessor,
+                raw_batch=raw_batch,
+                action_step=action_step,
+                action_dim=action_dim,
+            )
+        frame = render_gradcam_frame(
+            raw_images=raw_images,
+            cams=cams,
+            obs_step=obs_step,
+            camera_index=camera_index,
+            view=view,
+            alpha=alpha,
+        )
+        frames.append(frame.numpy())
+        target_values.append((sample_idx, target_value))
+
+    write_video(video_path, frames, fps=fps)
+    (output_dir / f"{video_path.stem}_targets.txt").write_text(
+        "\n".join(f"{sample_idx},{value}" for sample_idx, value in target_values) + "\n"
+    )
+    return video_path
+
+
+def _get_episode_range_for_sample(dataset, sample_index: int) -> tuple[int, int, int]:
+    """Return (episode_index, start_index, end_index_exclusive) for the sample's episode."""
+    item = dataset[sample_index]
+    episode_index = int(item["episode_index"].item())
+    episode = dataset.meta.episodes[episode_index]
+    start_index = int(episode["dataset_from_index"])
+    end_index = int(episode["dataset_to_index"])
+    return episode_index, start_index, end_index
+
+
+def _get_episode_range(dataset, episode_index: int) -> tuple[int, int, int]:
+    """Return (episode_index, start_index, end_index_exclusive) for an explicit episode index."""
+    if episode_index < 0 or episode_index >= len(dataset.meta.episodes):
+        raise IndexError(
+            f"episode-index {episode_index} is out of bounds for {len(dataset.meta.episodes)} episodes."
+        )
+    episode = dataset.meta.episodes[episode_index]
+    start_index = int(episode["dataset_from_index"])
+    end_index = int(episode["dataset_to_index"])
+    return episode_index, start_index, end_index
 
 
 def main() -> None:
@@ -196,6 +353,55 @@ def main() -> None:
         f"action_dim={args.action_dim}",
     ]
     summary_path.write_text("\n".join(summary_lines) + "\n")
+
+    if args.export_video:
+        video_start_index = args.sample_index
+        video_num_samples = args.video_num_samples
+        if args.video_episode_index is not None:
+            episode_index, episode_start, episode_end = _get_episode_range(dataset, args.video_episode_index)
+            video_start_index = episode_start
+            video_num_samples = episode_end - episode_start
+            logging.info(
+                "Rendering explicit episode %s: dataset indices [%s, %s), total raw frames=%s, target fps=%s.",
+                episode_index,
+                episode_start,
+                episode_end,
+                video_num_samples,
+                args.video_fps,
+            )
+        elif args.video_full_episode:
+            episode_index, episode_start, episode_end = _get_episode_range_for_sample(dataset, args.sample_index)
+            video_start_index = episode_start
+            video_num_samples = episode_end - episode_start
+            logging.info(
+                "sample-index %s belongs to episode %s. Rendering the FULL episode from its first frame: "
+                "dataset indices [%s, %s), total raw frames=%s, target fps=%s. "
+                "If you want to start exactly at sample-index, omit --video-full-episode.",
+                args.sample_index,
+                episode_index,
+                episode_start,
+                episode_end,
+                video_num_samples,
+                args.video_fps,
+            )
+
+        video_path = _export_inference_gradcam_video(
+            policy=policy,
+            preprocessor=preprocessor,
+            dataset=dataset,
+            output_dir=args.output_dir,
+            start_index=video_start_index,
+            num_samples=video_num_samples,
+            fps=args.video_fps,
+            view=args.video_view,
+            obs_step=args.video_obs_step,
+            camera_index=args.video_camera_index,
+            action_step=args.action_step,
+            action_dim=args.action_dim,
+            alpha=args.alpha,
+            video_name=args.video_name,
+        )
+        logging.info("Grad-CAM video saved to: %s", video_path)
 
     logging.info("Grad-CAM export finished. Results saved under: %s", output_dir)
 
