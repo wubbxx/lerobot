@@ -20,6 +20,7 @@ from typing import Any
 
 import draccus
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import HFValidationError
 from huggingface_hub.errors import HfHubHTTPError
 
 from lerobot import envs
@@ -178,15 +179,19 @@ class TrainPipelineConfig(HubMixin):
         **kwargs: Any,
     ) -> "TrainPipelineConfig":
         model_id = str(pretrained_name_or_path)
+        model_path = Path(model_id)
         config_file: str | None = None
-        if Path(model_id).is_dir():
+        if model_path.is_dir():
             if TRAIN_CONFIG_NAME in os.listdir(model_id):
                 config_file = os.path.join(model_id, TRAIN_CONFIG_NAME)
             else:
-                print(f"{TRAIN_CONFIG_NAME} not found in {Path(model_id).resolve()}")
-        elif Path(model_id).is_file():
+                raise FileNotFoundError(f"{TRAIN_CONFIG_NAME} not found in {model_path.resolve()}")
+        elif model_path.is_file():
             config_file = model_id
         else:
+            is_local_path = model_path.is_absolute() or any(sep in model_id for sep in (os.sep, "/", "\\"))
+            if is_local_path:
+                raise FileNotFoundError(f"Local train config not found: {model_path}")
             try:
                 config_file = hf_hub_download(
                     repo_id=model_id,
@@ -199,6 +204,8 @@ class TrainPipelineConfig(HubMixin):
                     token=token,
                     local_files_only=local_files_only,
                 )
+            except HFValidationError as e:
+                raise FileNotFoundError(f"Invalid train config source: {model_id}") from e
             except HfHubHTTPError as e:
                 raise FileNotFoundError(
                     f"{TRAIN_CONFIG_NAME} not found on the HuggingFace Hub in {model_id}"
