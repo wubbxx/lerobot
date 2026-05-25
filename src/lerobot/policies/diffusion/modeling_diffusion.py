@@ -29,6 +29,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 import torchvision
+import time
+import logging
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn
@@ -132,7 +134,10 @@ class DiffusionPolicy(PreTrainedPolicy):
         self._queues = populate_queues(self._queues, batch)
 
         if len(self._queues[ACTION]) == 0:
+            t0 = time.perf_counter()
             actions = self.predict_action_chunk(batch, noise=noise)
+            t1 = time.perf_counter()
+            print(f"select_action: predict_action_chunk_time={t1-t0:.4f}s", flush=True)
             self._queues[ACTION].extend(actions.transpose(0, 1))
 
         action = self._queues[ACTION].popleft()
@@ -217,6 +222,11 @@ class DiffusionModel(nn.Module):
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
 
+        print(
+            f"DiffusionModel.conditional_sample start: batch_size={batch_size} device={device} dtype={dtype} num_inference_steps={self.num_inference_steps}",
+            flush=True,
+        )
+
         # Sample prior.
         sample = (
             noise
@@ -231,7 +241,14 @@ class DiffusionModel(nn.Module):
 
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
-        for t in self.noise_scheduler.timesteps:
+        # Timing per-step to identify slow forwards / scheduler steps.
+        start_time = time.perf_counter()
+        step_times: list[float] = []
+        timesteps_list = list(self.noise_scheduler.timesteps)
+        total_steps = len(timesteps_list)
+
+        for i, t in enumerate(timesteps_list):
+            step_start = time.perf_counter()
             # Predict model output.
             model_output = self.unet(
                 sample,
@@ -240,6 +257,23 @@ class DiffusionModel(nn.Module):
             )
             # Compute previous image: x_t -> x_t-1
             sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
+            step_elapsed = time.perf_counter() - step_start
+            step_times.append(step_elapsed)
+
+            # Print periodic progress to avoid overwhelming logs.
+            if (i + 1) % 10 == 0 or (i + 1) == total_steps:
+                avg = sum(step_times) / len(step_times)
+                print(
+                    f"denoise progress {i+1}/{total_steps} t={t} step_time={step_elapsed:.4f}s avg_step={avg:.4f}s",
+                    flush=True,
+                )
+
+        total_elapsed = time.perf_counter() - start_time
+        avg_step = sum(step_times) / len(step_times) if step_times else 0.0
+        print(
+            f"DiffusionModel.conditional_sample done: total_time={total_elapsed:.4f}s total_steps={total_steps} avg_step={avg_step:.4f}s",
+            flush=True,
+        )
 
         return sample
 
@@ -298,8 +332,12 @@ class DiffusionModel(nn.Module):
         # Encode image features and concatenate them all together along with the state vector.
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
+        print(f"generate_actions: batch_size={batch_size} n_obs_steps={n_obs_steps}", flush=True)
+        sample_start = time.perf_counter()
         # run sampling
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
+        sample_elapsed = time.perf_counter() - sample_start
+        print(f"generate_actions: sampling_time={sample_elapsed:.4f}s", flush=True)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
         start = n_obs_steps - 1

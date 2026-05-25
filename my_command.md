@@ -25,8 +25,7 @@ scp -r wbx@192.168.10.16:~/embodied-ai/lerobot/outputs/train/reach_yellow/checkp
 scp -r wbx@192.168.10.16:~/embodied-ai/lerobot/outputs/train/reach_yellow/checkpoints/last /home/nvidia/lerobot/outputs/train/reach_yellow/checkpoints/last
 
 
-rm -r /home/nvidia/.cache/huggingface/lerobot/reach_yellow/eval_0519 \
-&& \
+rm -r /home/nvidia/.cache/huggingface/lerobot/reach_yellow/eval_0519 && \
 lerobot-record \
   --robot.type=so101_follower \
   --robot.port=/dev/ttyACM0 \
@@ -35,7 +34,8 @@ lerobot-record \
   --display_data=false \
   --dataset.repo_id=reach_yellow/eval_0519 \
   --dataset.single_task="reach the yellow block" \
-  --policy.path=outputs/train/reach_yellow/checkpoints/last/pretrained_model
+  --policy.path=outputs/train/reach_yellow/checkpoints/last/pretrained_model \
+  --dataset.push_to_hub=false
 
 lerobot-teleoperate \
     --robot.type=so101_follower \
