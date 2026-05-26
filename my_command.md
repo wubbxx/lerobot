@@ -28,14 +28,15 @@ scp -r wbx@192.168.10.16:~/embodied-ai/lerobot/outputs/train/reach_yellow/checkp
 rm -r /home/nvidia/.cache/huggingface/lerobot/reach_yellow/eval_0519 && \
 lerobot-record \
   --robot.type=so101_follower \
-  --robot.port=/dev/ttyACM0 \
+  --robot.port=/dev/ttyACM1 \
   --robot.cameras='{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: "MJPG"}}' \
   --robot.id=my_awesome_follower_arm \
   --display_data=false \
   --dataset.repo_id=reach_yellow/eval_0519 \
   --dataset.single_task="reach the yellow block" \
   --policy.path=outputs/train/reach_yellow/checkpoints/last/pretrained_model \
-  --dataset.push_to_hub=false
+  --dataset.push_to_hub=false \
+--policy.num_inference_steps=10
 
 lerobot-teleoperate \
     --robot.type=so101_follower \

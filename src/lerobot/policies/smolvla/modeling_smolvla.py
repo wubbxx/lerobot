@@ -1,3 +1,4 @@
+from typing_extensions import Unpack
 #!/usr/bin/env python
 
 # Copyright 2025 HuggingFace Inc. team. All rights reserved.
@@ -54,7 +55,7 @@ policy = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
 
 import math
 from collections import deque
-from typing import TypedDict, Unpack
+from typing import TypedDict
 
 import torch
 import torch.nn.functional as F  # noqa: N812

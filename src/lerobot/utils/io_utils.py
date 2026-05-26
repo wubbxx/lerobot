@@ -1,3 +1,6 @@
+from typing_extensions import TypeVar
+
+T = TypeVar("T", bound="JsonLike")
 #!/usr/bin/env python
 
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
@@ -31,7 +34,7 @@ def write_video(video_path, stacked_frames, fps):
         imageio.mimsave(video_path, stacked_frames, fps=fps)
 
 
-def deserialize_json_into_object[T: JsonLike](fpath: Path, obj: T) -> T:
+def deserialize_json_into_object(fpath: Path, obj: T) -> T:
     """
     Loads the JSON data from `fpath` and recursively fills `obj` with the
     corresponding values (strictly matching structure and types).
